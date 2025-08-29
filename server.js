@@ -11,25 +11,25 @@ app.use(cors());
 app.use(express.json());
 
 // --- DA PERSONALIZZARE ---
-// Ho ricreato una struttura prezzi dettagliata.
-// Assicurati che i prezzi qui corrispondano a quelli sul tuo sito.
-// Tutti i prezzi sono in CENTESIMI (es. 299.00€ -> 29900).
+// Struttura prezzi con i valori corretti in CENTESIMI.
+// Regola: Prezzo in Euro × 100 = Valore in Centesimi
+// Esempio: €2.990,00  ->  299000
 
 const PRICES = {
-  'dp-mini-base': 29900,
-  'dp-pro-base': 89900,
+  'dp-mini-base': 299000, // Corretto da 29900
+  'dp-pro-base': 899000,   // Corretto da 89900
   // Aggiungi qui gli altri prodotti base
 };
 
 const OPTIONS_PRICES = {
   // Opzioni DP Mini
-  objectives: { '50mm': 0, '60mm': 1800, '75mm': 3500 },
-  eyepieces: { screen: 0, hd: 2900, '4k': 5800 },
-  mounting: { handle: 0, arm: 2200 },
+  objectives: { '50mm': 0, '60mm': 18000, '75mm': 35000 },    // Corretto
+  eyepieces: { screen: 0, hd: 29000, '4k': 58000 },         // Corretto
+  mounting: { handle: 0, arm: 22000 },                      // Corretto
   // Opzioni DP Pro (aggiungi le altre se necessario)
-  stabilization: { '3axis': 0, enhanced: 4500 },
+  stabilization: { '3axis': 0, enhanced: 45000 },             // Corretto
   // Opzioni comuni
-  care: { none: 0, basic: 2900, plus: 4900 },
+  care: { none: 0, basic: 29000, plus: 49000 },             // Corretto
   // Aggiungi qui tutte le altre opzioni...
 };
 
@@ -66,7 +66,6 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 
   try {
-    // NUOVA LOGICA: Calcoliamo il prezzo per ogni articolo sul server
     const lineItems = cart.map(item => {
       const serverPrice = calculateItemPrice(item);
       
@@ -94,7 +93,7 @@ app.post('/create-checkout-session', async (req, res) => {
         {
           shipping_rate_data: {
             type: 'fixed_amount',
-            fixed_amount: { amount: 4990, currency: 'eur' },
+            fixed_amount: { amount: 4990, currency: 'eur' }, // 49.90€
             display_name: 'Spedizione Standard Internazionale',
           },
         },
