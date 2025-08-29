@@ -4,46 +4,30 @@ import Stripe from 'stripe';
 import cors from 'cors';
 import 'dotenv/config';
 import fs from 'fs';
+import path from 'path';
 import csvParser from 'csv-parser';
 import { createObjectCsvWriter } from 'csv-writer';
 
 // =======================
-// Inizializzazione
+// Config & Init
 // =======================
 const app = express();
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY /*, { apiVersion: '2023-10-16' } */);
 
-// (opzionale ma consigliato) fissa una API version compatibile
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  // apiVersion: '2023-10-16', // scommenta se vuoi forzare la versione API
-});
-
-// =======================
-// CORS (a prova di preflight)
-// =======================
+// CORS solido (preflight incluso)
 app.use(
   cors({
-    origin: true, // riflette l'Origin chiamante
+    origin: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: false,
+    allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature'],
   })
 );
 app.options('*', cors());
 
-// Header di cortesia anche sugli errori
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  next();
-});
-
-// =======================
 // Body parser: JSON per tutto tranne il webhook (raw)
-// =======================
 app.use((req, res, next) => {
   if (req.originalUrl === '/stripe-webhook') {
-    next(); // il webhook usa express.raw
+    next();
   } else {
     express.json()(req, res, next);
   }
@@ -52,9 +36,13 @@ app.use((req, res, next) => {
 // =======================
 // Database CSV (licenze)
 // =======================
-const DB_PATH = './database.csv';
+// Se stai su Render con Persistent Disk, monta a /data e userai /data/database.csv
+const DB_PATH = process.env.DB_PATH || '/data/database.csv';
+fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
+
 let licenseDatabase = {};
 
+// Carica CSV (se esiste)
 if (fs.existsSync(DB_PATH)) {
   fs.createReadStream(DB_PATH)
     .pipe(csvParser())
@@ -68,19 +56,19 @@ if (fs.existsSync(DB_PATH)) {
       if (row.feature_ndi === 'True') features.push('ndi');
       licenseDatabase[serial] = {
         status: row.status || 'not-active',
-        activation_date: row.activation_date || null,
-        expires: row.expiration_date || null,
+        activation_date: row.activation_date || '',
+        expires: row.expiration_date || '',
         activeFeatures: features,
       };
     })
-    .on('end', () => {
-      console.log('📁 Database CSV caricato in memoria.');
-    });
+    .on('end', () => console.log('📁 Database CSV caricato in memoria.'));
 } else {
-  console.log('ℹ️ Nessun database.csv: verrà creato al primo salvataggio.');
+  console.log('ℹ️ Nessun CSV iniziale: verrà creato al primo salvataggio in', DB_PATH);
 }
 
+// Salva CSV
 const saveDatabase = async () => {
+  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   const csvWriter = createObjectCsvWriter({
     path: DB_PATH,
     header: [
@@ -107,7 +95,7 @@ const saveDatabase = async () => {
   }));
 
   await csvWriter.writeRecords(records);
-  console.log('✅ Database CSV aggiornato.');
+  console.log('🗄️ CSV salvato su', DB_PATH);
 };
 
 // =======================
@@ -145,7 +133,7 @@ function calculateItemPrice(item) {
 }
 
 // =======================
-// Rotte
+// Rotte API
 // =======================
 app.get('/', (req, res) => {
   res.send('DP Biotech Payment Server è attivo. ✅');
@@ -158,30 +146,32 @@ app.get('/check-license/:serial', (req, res) => {
   res.status(404).json({ error: 'License not found' });
 });
 
-app.post('/create-checkout-session', async (req, res) => {
-  // Log ingresso (utile in debug)
-  console.log('➡️  /create-checkout-session payload:', JSON.stringify(req.body, null, 2));
+app.get('/debug-licenses', (req, res) => {
+  // endpoint di debug (rimuovi in produzione)
+  res.json(licenseDatabase);
+});
 
+app.post('/create-checkout-session', async (req, res) => {
+  console.log('➡️  /create-checkout-session', JSON.stringify(req.body, null, 2));
   const { cart, customerEmail, serialNumber } = req.body;
 
-  // Validazioni base
   if (!process.env.STRIPE_SECRET_KEY) {
     console.error('❌ STRIPE_SECRET_KEY mancante');
-    return res.status(500).json({ error: 'Stripe configuration missing (secret key).' });
+    return res.status(500).json({ error: 'Stripe configuration missing.' });
   }
   if (!customerEmail || !Array.isArray(cart) || cart.length === 0) {
     return res.status(400).json({ error: 'Dati mancanti: carrello e email sono obbligatori.' });
   }
 
-  // Validazione ID carrello
+  // valida carrello
   try {
-    cart.forEach((item) => {
-      if (!item?.id || PRICES[item.id] === undefined) {
-        throw new Error(`ID Prodotto non valido: '${item?.id}'`);
+    cart.forEach((i) => {
+      if (!i?.id || PRICES[i.id] === undefined) {
+        throw new Error(`ID Prodotto non valido: '${i?.id}'`);
       }
     });
   } catch (e) {
-    console.error('❌ Cart validation error:', e.message);
+    console.error('❌ Cart validation:', e.message);
     return res.status(400).json({ error: e.message });
   }
 
@@ -195,28 +185,25 @@ app.post('/create-checkout-session', async (req, res) => {
       quantity: 1,
     }));
 
-    // Crea cliente (o riusa se stessa email già presente: Stripe gestisce)
     const customer = await stripe.customers.create({ email: customerEmail });
 
-    // Metadati per il webhook
-    const sessionMetadata = {};
+    const metadata = {};
     if (serialNumber) {
-      sessionMetadata.serial_number = String(serialNumber).toUpperCase();
-      sessionMetadata.features_purchased = cart
+      metadata.serial_number = String(serialNumber).toUpperCase();
+      metadata.features_purchased = cart
         .filter((i) => String(i.id).startsWith('feature-'))
         .map((i) => i.id)
         .join(',');
     }
 
-    // *** Compatibile con API meno recenti: niente automatic_payment_methods ***
     const session = await stripe.checkout.sessions.create({
       customer: customer.id,
       mode: 'payment',
-      payment_method_types: ['card'], // compatibile
+      payment_method_types: ['card'], // compatibile con API meno recenti
       line_items: lineItems,
-      metadata: sessionMetadata,
-      success_url: `https://www.dpbiotech.com/success.html`,
-      cancel_url: `https://www.dpbiotech.com/checkout.html`,
+      metadata,
+      success_url: 'https://www.dpbiotech.com/success.html',
+      cancel_url: 'https://www.dpbiotech.com/checkout.html',
     });
 
     console.log('✅ Stripe session created:', session.id);
@@ -227,63 +214,80 @@ app.post('/create-checkout-session', async (req, res) => {
       type: error.type,
       code: error.code,
       param: error.param,
-      raw: error.raw,
     });
-    const status = error?.statusCode && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+    const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
     res.status(status).json({ error: error.message || 'Errore interno del server.' });
   }
 });
 
 // =======================
-// Webhook Stripe (raw body)
+// Webhook Stripe (RAW body obbligatorio)
 // =======================
 app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+  console.log('➡️ Webhook hit');
   const sig = req.headers['stripe-signature'];
   const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+  console.log('Has signature header?', !!sig);
+  console.log('STRIPE_WEBHOOK_SECRET present?', !!endpointSecret);
+
+  if (!endpointSecret) {
+    console.error('❌ STRIPE_WEBHOOK_SECRET mancante. Configura la env e redeploya.');
+    return res.status(500).send('Webhook secret not configured');
+  }
 
   let event;
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+    console.log('✅ constructEvent OK. type:', event.type);
   } catch (err) {
-    console.log('⚠️ Webhook signature verification failed.', err.message);
+    console.error('⚠️ Signature verification failed:', err.message);
     return res.sendStatus(400);
   }
 
   if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
+    try {
+      const session = event.data.object; // Checkout Session
+      const serial = String(session.metadata?.serial_number || '').toUpperCase();
+      const featuresPurchased = String(session.metadata?.features_purchased || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((fid) => fid.replace(/^feature-/, ''));
 
-    const serial = (session.metadata?.serial_number || '').toUpperCase();
-    const featuresPurchased = (session.metadata?.features_purchased || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((fid) => fid.replace(/^feature-/, ''));
+      console.log('ℹ️ serial:', serial, 'featuresPurchased:', featuresPurchased);
 
-    console.log(`💳 Pagamento completato per seriale: ${serial}`);
+      if (!serial) {
+        console.error('❌ Nessun serial nei metadata.');
+        return res.json({ received: true });
+      }
 
-    if (serial) {
       if (!licenseDatabase[serial]) {
         licenseDatabase[serial] = {
           status: 'not-active',
-          activation_date: null,
-          expires: null,
+          activation_date: '',
+          expires: '',
           activeFeatures: [],
         };
       }
 
-      licenseDatabase[serial].status = 'valid';
+      // aggiorna in memoria
       const today = new Date();
+      licenseDatabase[serial].status = 'valid';
       licenseDatabase[serial].activation_date = today.toISOString().split('T')[0];
       const nextYear = new Date(today);
       nextYear.setFullYear(today.getFullYear() + 1);
       licenseDatabase[serial].expires = nextYear.toISOString().split('T')[0];
 
-      const setFeatures = new Set(licenseDatabase[serial].activeFeatures);
-      featuresPurchased.forEach((f) => setFeatures.add(f));
-      licenseDatabase[serial].activeFeatures = Array.from(setFeatures);
+      const set = new Set(licenseDatabase[serial].activeFeatures);
+      featuresPurchased.forEach((f) => set.add(f));
+      licenseDatabase[serial].activeFeatures = Array.from(set);
 
       await saveDatabase();
-      console.log('🗄️  Licenza aggiornata e salvata su CSV.');
+      console.log('🗄️ CSV aggiornato dopo pagamento.');
+    } catch (e) {
+      console.error('❌ Errore gestione checkout.session.completed:', e);
+      return res.sendStatus(500);
     }
   }
 
@@ -291,7 +295,7 @@ app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (re
 });
 
 // =======================
-// Avvio server
+// Avvio
 // =======================
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`🚀 Server in ascolto sulla porta ${PORT}`));
