@@ -3,28 +3,29 @@ import express from 'express';
 import Stripe from 'stripe';
 import cors from 'cors';
 import 'dotenv/config';
-import fs from 'fs';
-import path from 'path';
-import csvParser from 'csv-parser';
-import { createObjectCsvWriter } from 'csv-writer';
 
-// =======================
-// Config & Init
-// =======================
+// ====== CONFIG ENV ======
+const {
+  STRIPE_SECRET_KEY,
+  STRIPE_WEBHOOK_SECRET,
+  GITHUB_TOKEN,
+  GITHUB_OWNER = 'marcodalpont',
+  GITHUB_REPO = 'dp-biotech-server',
+  GITHUB_BRANCH = 'main',
+  GITHUB_FILE_PATH = 'database.csv',
+  PORT = process.env.PORT || 4242,
+} = process.env;
+
+if (!STRIPE_SECRET_KEY) console.error('❗ Missing STRIPE_SECRET_KEY');
+if (!STRIPE_WEBHOOK_SECRET) console.error('❗ Missing STRIPE_WEBHOOK_SECRET');
+if (!GITHUB_TOKEN) console.error('❗ Missing GITHUB_TOKEN');
+
+// ====== INIT ======
 const app = express();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY /*, { apiVersion: '2023-10-16' } */);
+const stripe = new Stripe(STRIPE_SECRET_KEY);
 
-// CORS solido (preflight incluso)
-app.use(
-  cors({
-    origin: true,
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Stripe-Signature'],
-  })
-);
-app.options('*', cors());
-
-// Body parser: JSON per tutto tranne il webhook (raw)
+// JSON body per tutte le rotte tranne il webhook (serve raw)
+app.use(cors());
 app.use((req, res, next) => {
   if (req.originalUrl === '/stripe-webhook') {
     next();
@@ -33,82 +34,181 @@ app.use((req, res, next) => {
   }
 });
 
-// =======================
-// Database CSV (licenze)
-// =======================
-// Se stai su Render con Persistent Disk, monta a /data e userai /data/database.csv
-const DB_PATH = process.env.DB_PATH || '/data/database.csv';
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-
+// ====== IN-MEMORY DB ======
+/**
+ * licenseDatabase = {
+ *   [SERIAL]: {
+ *     status: 'valid'|'expired'|'not-active',
+ *     activation_date: 'YYYY-MM-DD' | null,
+ *     expires: 'YYYY-MM-DD' | null,
+ *     activeFeatures: ['3d-models','parallax','image-addition','ndi']
+ *   }
+ * }
+ */
 let licenseDatabase = {};
 
-// Carica CSV (se esiste)
-if (fs.existsSync(DB_PATH)) {
-  fs.createReadStream(DB_PATH)
-    .pipe(csvParser())
-    .on('data', (row) => {
-      const serial = (row.serial || '').toUpperCase();
-      if (!serial) return;
-      const features = [];
-      if (row.feature_3d_models === 'True') features.push('3d-models');
-      if (row.feature_parallax === 'True') features.push('parallax');
-      if (row.feature_image_addition === 'True') features.push('image-addition');
-      if (row.feature_ndi === 'True') features.push('ndi');
-      licenseDatabase[serial] = {
-        status: row.status || 'not-active',
-        activation_date: row.activation_date || '',
-        expires: row.expiration_date || '',
-        activeFeatures: features,
-      };
-    })
-    .on('end', () => console.log('📁 Database CSV caricato in memoria.'));
-} else {
-  console.log('ℹ️ Nessun CSV iniziale: verrà creato al primo salvataggio in', DB_PATH);
+// ====== GITHUB HELPERS ======
+const GH_API = 'https://api.github.com';
+
+async function githubGetFile(owner, repo, path, branch, token) {
+  const url = `${GH_API}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`;
+  const resp = await fetch(url, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+    },
+  });
+  if (resp.status === 404) return null; // file non esiste
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`GitHub GET failed ${resp.status}: ${t}`);
+  }
+  return await resp.json();
 }
 
-// Salva CSV
-const saveDatabase = async () => {
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  const csvWriter = createObjectCsvWriter({
-    path: DB_PATH,
-    header: [
-      { id: 'serial', title: 'serial' },
-      { id: 'status', title: 'status' },
-      { id: 'activation_date', title: 'activation_date' },
-      { id: 'expiration_date', title: 'expiration_date' },
-      { id: 'feature_3d_models', title: 'feature_3d_models' },
-      { id: 'feature_parallax', title: 'feature_parallax' },
-      { id: 'feature_image_addition', title: 'feature_image_addition' },
-      { id: 'feature_ndi', title: 'feature_ndi' },
-    ],
+async function githubPutFile({ owner, repo, path, branch, token, contentBase64, sha, message }) {
+  const url = `${GH_API}/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+  const body = {
+    message,
+    content: contentBase64,
+    branch,
+    ...(sha ? { sha } : {})
+  };
+  const resp = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
   });
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`GitHub PUT failed ${resp.status}: ${t}`);
+  }
+  return await resp.json();
+}
 
-  const records = Object.entries(licenseDatabase).map(([serial, data]) => ({
-    serial,
-    status: data.status,
-    activation_date: data.activation_date || '',
-    expiration_date: data.expires || '',
-    feature_3d_models: data.activeFeatures.includes('3d-models') ? 'True' : 'False',
-    feature_parallax: data.activeFeatures.includes('parallax') ? 'True' : 'False',
-    feature_image_addition: data.activeFeatures.includes('image-addition') ? 'True' : 'False',
-    feature_ndi: data.activeFeatures.includes('ndi') ? 'True' : 'False',
-  }));
+// ====== CSV HELPERS (senza I/O su disco) ======
+const CSV_HEADERS = [
+  'serial',
+  'status',
+  'activation_date',
+  'expiration_date',
+  'feature_3d_models',
+  'feature_parallax',
+  'feature_image_addition',
+  'feature_ndi',
+];
 
-  await csvWriter.writeRecords(records);
-  console.log('🗄️ CSV salvato su', DB_PATH);
-};
+function csvEscape(val) {
+  if (val == null) return '';
+  const s = String(val);
+  if (/[",\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
 
-// =======================
-// Prezzi (in centesimi)
-// =======================
+function dbToCsv(db) {
+  const lines = [];
+  lines.push(CSV_HEADERS.join(','));
+  for (const [serial, data] of Object.entries(db)) {
+    const row = [
+      serial,
+      data.status || 'not-active',
+      data.activation_date || '',
+      data.expires || '',
+      (data.activeFeatures || []).includes('3d-models') ? 'True' : 'False',
+      (data.activeFeatures || []).includes('parallax') ? 'True' : 'False',
+      (data.activeFeatures || []).includes('image-addition') ? 'True' : 'False',
+      (data.activeFeatures || []).includes('ndi') ? 'True' : 'False',
+    ].map(csvEscape);
+    lines.push(row.join(','));
+  }
+  return lines.join('\n');
+}
+
+function csvToDb(csv) {
+  const lines = csv.split(/\r?\n/).filter(Boolean);
+  if (lines.length === 0) return {};
+  // Parsing semplice (no virgole quotate complesse): il tuo CSV non usa campi con virgole.
+  const header = lines[0].split(',');
+  const idx = Object.fromEntries(header.map((h, i) => [h.trim(), i]));
+
+  const out = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(',');
+    const serial = (cols[idx.serial] || '').toUpperCase().trim();
+    if (!serial) continue;
+
+    const features = [];
+    if ((cols[idx.feature_3d_models] || '').trim() === 'True') features.push('3d-models');
+    if ((cols[idx.feature_parallax] || '').trim() === 'True') features.push('parallax');
+    if ((cols[idx.feature_image_addition] || '').trim() === 'True') features.push('image-addition');
+    if ((cols[idx.feature_ndi] || '').trim() === 'True') features.push('ndi');
+
+    out[serial] = {
+      status: (cols[idx.status] || 'not-active').trim(),
+      activation_date: (cols[idx.activation_date] || '').trim() || null,
+      expires: (cols[idx.expiration_date] || '').trim() || null,
+      activeFeatures: features,
+    };
+  }
+  return out;
+}
+
+// Carica CSV da GitHub in memoria
+let currentGitSha = null;
+async function loadDatabaseFromGitHub() {
+  try {
+    const fileMeta = await githubGetFile(GITHUB_OWNER, GITHUB_REPO, GITHUB_FILE_PATH, GITHUB_BRANCH, GITHUB_TOKEN);
+    if (!fileMeta) {
+      console.warn('⚠️ database.csv non trovato su GitHub, inizializzo DB vuoto.');
+      licenseDatabase = {};
+      currentGitSha = null;
+      return;
+    }
+    const content = Buffer.from(fileMeta.content, 'base64').toString('utf8');
+    licenseDatabase = csvToDb(content);
+    currentGitSha = fileMeta.sha;
+    console.log('📁 Database CSV caricato da GitHub in memoria.');
+  } catch (err) {
+    console.error('Errore caricamento CSV da GitHub:', err.message);
+    // Non crashare: tieni DB vuoto
+    licenseDatabase = {};
+    currentGitSha = null;
+  }
+}
+
+// Salva CSV (aggiornato) su GitHub con commit
+async function saveDatabaseToGitHub({ commitMessage = 'chore: update license database (webhook)' } = {}) {
+  const csv = dbToCsv(licenseDatabase);
+  const contentBase64 = Buffer.from(csv, 'utf8').toString('base64');
+  const result = await githubPutFile({
+    owner: GITHUB_OWNER,
+    repo: GITHUB_REPO,
+    path: GITHUB_FILE_PATH,
+    branch: GITHUB_BRANCH,
+    token: GITHUB_TOKEN,
+    contentBase64,
+    sha: currentGitSha || undefined,
+    message: commitMessage,
+  });
+  currentGitSha = result.content?.sha || currentGitSha;
+  console.log('✅ Database CSV aggiornato su GitHub.');
+}
+
+// ====== PREZZI (server-trusted) ======
 const PRICES = {
-  'dp-mini-base': 299000,
-  'dp-pro-base': 899000,
-  'license-base': 60000,            // €600
-  'feature-3d-models': 12900,       // €129
-  'feature-parallax': 4900,         // €49
-  'feature-image-addition': 4900,   // €49
-  'feature-ndi': 22000,             // €220
+  'dp-mini-base': 299000,          // € 2.990,00
+  'dp-pro-base': 899000,           // € 8.990,00
+  'license-base': 60000,           // €   600,00
+  'feature-3d-models': 12900,      // €   129,00
+  'feature-parallax': 4900,        // €    49,00
+  'feature-image-addition': 4900,  // €    49,00
+  'feature-ndi': 22000,            // €   220,00
 };
 
 const OPTIONS_PRICES = {
@@ -120,7 +220,7 @@ const OPTIONS_PRICES = {
 };
 
 function calculateItemPrice(item) {
-  if (!item?.id || PRICES[item.id] === undefined) {
+  if (!item?.id || PRICES[item.id] == null) {
     throw new Error(`ID Prodotto non valido: '${item?.id}'`);
   }
   let total = PRICES[item.id];
@@ -132,46 +232,33 @@ function calculateItemPrice(item) {
   return total;
 }
 
-// =======================
-// Rotte API
-// =======================
+// ====== ROUTES ======
 app.get('/', (req, res) => {
-  res.send('DP Biotech Payment Server è attivo. ✅');
+  res.send('DP Biotech Payment Server attivo ✅ (GitHub-backed CSV)');
 });
 
-app.get('/check-license/:serial', (req, res) => {
-  const serial = (req.params.serial || '').toUpperCase();
+app.get('/check-license/:serial', async (req, res) => {
+  const serial = (req.params.serial || '').toUpperCase().trim();
   const licenseInfo = licenseDatabase[serial];
-  if (licenseInfo) return res.json(licenseInfo);
-  res.status(404).json({ error: 'License not found' });
-});
-
-app.get('/debug-licenses', (req, res) => {
-  // endpoint di debug (rimuovi in produzione)
-  res.json(licenseDatabase);
+  if (licenseInfo) res.json(licenseInfo);
+  else res.status(404).json({ error: 'License not found' });
 });
 
 app.post('/create-checkout-session', async (req, res) => {
-  console.log('➡️  /create-checkout-session', JSON.stringify(req.body, null, 2));
-  const { cart, customerEmail, serialNumber } = req.body;
+  const { cart, customerEmail, serialNumber } = req.body || {};
 
-  if (!process.env.STRIPE_SECRET_KEY) {
-    console.error('❌ STRIPE_SECRET_KEY mancante');
-    return res.status(500).json({ error: 'Stripe configuration missing.' });
-  }
   if (!customerEmail || !Array.isArray(cart) || cart.length === 0) {
     return res.status(400).json({ error: 'Dati mancanti: carrello e email sono obbligatori.' });
   }
 
-  // valida carrello
+  // Valida cart server-side
   try {
     cart.forEach((i) => {
-      if (!i?.id || PRICES[i.id] === undefined) {
+      if (!i?.id || PRICES[i.id] == null) {
         throw new Error(`ID Prodotto non valido: '${i?.id}'`);
       }
     });
   } catch (e) {
-    console.error('❌ Cart validation:', e.message);
     return res.status(400).json({ error: e.message });
   }
 
@@ -199,103 +286,88 @@ app.post('/create-checkout-session', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       customer: customer.id,
       mode: 'payment',
-      payment_method_types: ['card'], // compatibile con API meno recenti
+      payment_method_types: ['card'], // compatibile con tutte le versioni
       line_items: lineItems,
       metadata,
-      success_url: 'https://www.dpbiotech.com/success.html',
-      cancel_url: 'https://www.dpbiotech.com/checkout.html',
+      success_url: `https://www.dpbiotech.com/success.html`,
+      cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
 
-    console.log('✅ Stripe session created:', session.id);
+    console.log('Stripe session created:', session.id);
     res.json({ url: session.url });
   } catch (error) {
-    console.error('❌ Stripe error:', {
-      message: error.message,
-      type: error.type,
-      code: error.code,
-      param: error.param,
-    });
-    const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    console.error('Stripe error:', error);
+    const status = error?.statusCode && Number.isInteger(error.statusCode) ? error.statusCode : 500;
     res.status(status).json({ error: error.message || 'Errore interno del server.' });
   }
 });
 
-// =======================
-// Webhook Stripe (RAW body obbligatorio)
-// =======================
+// Webhook: usa raw body
 app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('➡️ Webhook hit');
-  const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  console.log('Has signature header?', !!sig);
-  console.log('STRIPE_WEBHOOK_SECRET present?', !!endpointSecret);
-
-  if (!endpointSecret) {
-    console.error('❌ STRIPE_WEBHOOK_SECRET mancante. Configura la env e redeploya.');
-    return res.status(500).send('Webhook secret not configured');
-  }
-
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-    console.log('✅ constructEvent OK. type:', event.type);
+    event = stripe.webhooks.constructEvent(req.body, req.headers['stripe-signature'], STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    console.error('⚠️ Signature verification failed:', err.message);
+    console.log('⚠️ Webhook signature verification failed.', err.message);
     return res.sendStatus(400);
   }
 
   if (event.type === 'checkout.session.completed') {
-    try {
-      const session = event.data.object; // Checkout Session
-      const serial = String(session.metadata?.serial_number || '').toUpperCase();
-      const featuresPurchased = String(session.metadata?.features_purchased || '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((fid) => fid.replace(/^feature-/, ''));
+    const session = event.data.object;
+    const serial = (session.metadata?.serial_number || '').toUpperCase().trim();
+    const featuresPurchased = (session.metadata?.features_purchased || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((fid) => fid.replace(/^feature-/, ''));
 
-      console.log('ℹ️ serial:', serial, 'featuresPurchased:', featuresPurchased);
+    console.log(`✅ Pagamento completato per serial: ${serial || '(nessun serial)'}`);
 
-      if (!serial) {
-        console.error('❌ Nessun serial nei metadata.');
-        return res.json({ received: true });
-      }
-
+    if (serial) {
       if (!licenseDatabase[serial]) {
         licenseDatabase[serial] = {
           status: 'not-active',
-          activation_date: '',
-          expires: '',
+          activation_date: null,
+          expires: null,
           activeFeatures: [],
         };
       }
 
-      // aggiorna in memoria
+      // Aggiorna stato & date
       const today = new Date();
+      const yyyy = today.getFullYear();
+      const mm = String(today.getMonth() + 1).padStart(2, '0');
+      const dd = String(today.getDate()).padStart(2, '0');
+
       licenseDatabase[serial].status = 'valid';
-      licenseDatabase[serial].activation_date = today.toISOString().split('T')[0];
+      licenseDatabase[serial].activation_date = `${yyyy}-${mm}-${dd}`;
+
       const nextYear = new Date(today);
       nextYear.setFullYear(today.getFullYear() + 1);
-      licenseDatabase[serial].expires = nextYear.toISOString().split('T')[0];
+      const nyyyy = nextYear.getFullYear();
+      const nmm = String(nextYear.getMonth() + 1).padStart(2, '0');
+      const ndd = String(nextYear.getDate()).padStart(2, '0');
+      licenseDatabase[serial].expires = `${nyyyy}-${nmm}-${ndd}`;
 
-      const set = new Set(licenseDatabase[serial].activeFeatures);
+      // Merge features
+      const set = new Set(licenseDatabase[serial].activeFeatures || []);
       featuresPurchased.forEach((f) => set.add(f));
       licenseDatabase[serial].activeFeatures = Array.from(set);
 
-      await saveDatabase();
-      console.log('🗄️ CSV aggiornato dopo pagamento.');
-    } catch (e) {
-      console.error('❌ Errore gestione checkout.session.completed:', e);
-      return res.sendStatus(500);
+      try {
+        await saveDatabaseToGitHub({ commitMessage: `feat(license): update ${serial} via Stripe webhook` });
+      } catch (e) {
+        console.error('❗ Errore salvataggio CSV su GitHub:', e.message);
+        // Non ritorniamo errore al webhook (Stripe ritenterebbe) se l'update DB è ok in memoria
+      }
     }
   }
 
   res.json({ received: true });
 });
 
-// =======================
-// Avvio
-// =======================
-const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`🚀 Server in ascolto sulla porta ${PORT}`));
+// ====== STARTUP ======
+app.listen(PORT, async () => {
+  console.log(`🚀 Server in ascolto sulla porta ${PORT}`);
+  await loadDatabaseFromGitHub();
+});
