@@ -1,5 +1,5 @@
 serial,status,activation_date,expiration_date,feature_3d_models,feature_parallax,feature_image_addition,feature_ndi
-DP8X1Y3Z,valid,2025-08-29,2026-08-29,False,True,True,False
+DP8X1Y3Z,valid,2025-08-29,2026-08-29,True,True,True,False
 DPG5H6J7,not-active,,,False,False,False,False
 DPK2L4M1,not-active,,,False,False,False,False
 DPN9B0V8,not-active,,,False,False,False,False
