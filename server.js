@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import Stripe from 'stripe';
 import cors from 'cors';
@@ -12,7 +13,6 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // --- Middleware ---
 app.use(cors());
-// Il webhook di Stripe ha bisogno del body "raw", quindi gestiamo il parsing JSON in modo condizionale.
 app.use((req, res, next) => {
   if (req.originalUrl === '/stripe-webhook') {
     next();
@@ -25,48 +25,52 @@ app.use((req, res, next) => {
 const DB_PATH = './database.csv';
 let licenseDatabase = {};
 
-fs.createReadStream(DB_PATH)
-  .pipe(csvParser())
-  .on('data', (row) => {
-    const serial = row.serial;
-    const features = [];
-    if (row.feature_3d_models === 'True') features.push('3d-models');
-    if (row.feature_parallax === 'True') features.push('parallax');
-    if (row.feature_image_addition === 'True') features.push('image-addition');
-    if (row.feature_ndi === 'True') features.push('ndi');
-    
-    licenseDatabase[serial] = {
-      status: row.status,
-      activation_date: row.activation_date,
-      expires: row.expiration_date,
-      activeFeatures: features,
-    };
-  })
-  .on('end', () => {
-    console.log('Database CSV caricato con successo in memoria.');
-  });
+if (fs.existsSync(DB_PATH)) {
+  fs.createReadStream(DB_PATH)
+    .pipe(csvParser())
+    .on('data', (row) => {
+      const serial = (row.serial || '').toUpperCase();
+      if (!serial) return;
+      const features = [];
+      if (row.feature_3d_models === 'True') features.push('3d-models');
+      if (row.feature_parallax === 'True') features.push('parallax');
+      if (row.feature_image_addition === 'True') features.push('image-addition');
+      if (row.feature_ndi === 'True') features.push('ndi');
+      licenseDatabase[serial] = {
+        status: row.status || 'not-active',
+        activation_date: row.activation_date || null,
+        expires: row.expiration_date || null,
+        activeFeatures: features,
+      };
+    })
+    .on('end', () => {
+      console.log('Database CSV caricato con successo in memoria.');
+    });
+} else {
+  console.log('Nessun database.csv trovato: ne verrà creato uno al primo salvataggio.');
+}
 
-// Funzione per salvare le modifiche sul file CSV
+// Funzione per salvare il database
 const saveDatabase = async () => {
   const csvWriter = createObjectCsvWriter({
     path: DB_PATH,
     header: [
-      {id: 'serial', title: 'serial'},
-      {id: 'status', title: 'status'},
-      {id: 'activation_date', title: 'activation_date'},
-      {id: 'expiration_date', title: 'expiration_date'},
-      {id: 'feature_3d_models', title: 'feature_3d_models'},
-      {id: 'feature_parallax', title: 'feature_parallax'},
-      {id: 'feature_image_addition', title: 'feature_image_addition'},
-      {id: 'feature_ndi', title: 'feature_ndi'},
-    ]
+      { id: 'serial', title: 'serial' },
+      { id: 'status', title: 'status' },
+      { id: 'activation_date', title: 'activation_date' },
+      { id: 'expiration_date', title: 'expiration_date' },
+      { id: 'feature_3d_models', title: 'feature_3d_models' },
+      { id: 'feature_parallax', title: 'feature_parallax' },
+      { id: 'feature_image_addition', title: 'feature_image_addition' },
+      { id: 'feature_ndi', title: 'feature_ndi' },
+    ],
   });
 
   const records = Object.entries(licenseDatabase).map(([serial, data]) => ({
-    serial: serial,
+    serial,
     status: data.status,
-    activation_date: data.activation_date,
-    expiration_date: data.expires,
+    activation_date: data.activation_date || '',
+    expiration_date: data.expires || '',
     feature_3d_models: data.activeFeatures.includes('3d-models') ? 'True' : 'False',
     feature_parallax: data.activeFeatures.includes('parallax') ? 'True' : 'False',
     feature_image_addition: data.activeFeatures.includes('image-addition') ? 'True' : 'False',
@@ -77,8 +81,7 @@ const saveDatabase = async () => {
   console.log('Database CSV aggiornato con successo.');
 };
 
-// --- Prezzi Prodotti (Fisici e Licenze) ---
-// Manteniamo i prezzi qui per facilità di gestione
+// Prezzi
 const PRICES = {
   'dp-mini-base': 299000,
   'dp-pro-base': 899000,
@@ -110,13 +113,11 @@ function calculateItemPrice(item) {
   return total;
 }
 
-// --- Rotte del Server ---
-
+// --- Rotte ---
 app.get('/', (req, res) => {
   res.send('DP Biotech Payment Server è attivo. ✅');
 });
 
-// NUOVO ENDPOINT per controllare lo stato di una licenza
 app.get('/check-license/:serial', (req, res) => {
   const serial = req.params.serial.toUpperCase();
   const licenseInfo = licenseDatabase[serial];
@@ -127,16 +128,14 @@ app.get('/check-license/:serial', (req, res) => {
   }
 });
 
-// Endpoint per creare la sessione di pagamento
 app.post('/create-checkout-session', async (req, res) => {
-  const { cart, customerEmail, serialNumber } = req.body; // Aggiunto serialNumber
-
+  const { cart, customerEmail, serialNumber } = req.body;
   if (!customerEmail || !cart || cart.length === 0) {
     return res.status(400).json({ error: 'Dati mancanti: carrello e email sono obbligatori.' });
   }
 
   try {
-    const lineItems = cart.map(item => ({
+    const lineItems = cart.map((item) => ({
       price_data: {
         currency: 'eur',
         product_data: { name: item.name },
@@ -147,41 +146,21 @@ app.post('/create-checkout-session', async (req, res) => {
 
     const customer = await stripe.customers.create({ email: customerEmail });
 
-    // Aggiungiamo il seriale ai metadati se si sta comprando una licenza
     const sessionMetadata = {};
     if (serialNumber) {
-        sessionMetadata.serial_number = serialNumber;
-        // Salva anche quali feature sono state comprate
-        sessionMetadata.features_purchased = cart
-            .filter(item => item.id.startsWith('feature-'))
-            .map(item => item.id)
-            .join(',');
+      sessionMetadata.serial_number = serialNumber;
+      sessionMetadata.features_purchased = cart
+        .filter((i) => i.id.startsWith('feature-'))
+        .map((i) => i.id)
+        .join(',');
     }
-    
+
     const session = await stripe.checkout.sessions.create({
       customer: customer.id,
       mode: 'payment',
-      payment_method_types: ['card', 'paypal', 'customer_balance'],
+      automatic_payment_methods: { enabled: true },
       line_items: lineItems,
-      metadata: sessionMetadata, // IMPORTANTE: Passiamo i metadati a Stripe
-      payment_method_options: {
-        customer_balance: {
-          funding_type: 'bank_transfer',
-          bank_transfer: { type: 'eu_bank_transfer', eu_bank_transfer: { country: 'DE' } },
-        },
-      },
-      shipping_address_collection: {
-        allowed_countries: ['IT', 'FR', 'DE', 'ES', 'GB', 'US', 'CH', 'AT', 'BE', 'NL'],
-      },
-      shipping_options: [
-        {
-          shipping_rate_data: {
-            type: 'fixed_amount',
-            fixed_amount: { amount: 4990, currency: 'eur' },
-            display_name: 'Spedizione Internazionale Standard',
-          },
-        },
-      ],
+      metadata: sessionMetadata,
       success_url: `https://www.dpbiotech.com/success.html`,
       cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
@@ -193,46 +172,56 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// NUOVO ENDPOINT per ricevere notifiche da Stripe (Webhook)
-app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req, res) => {
+app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET; // Imposta questa variabile nel tuo file .env!
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
   let event;
-
   try {
     event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
   } catch (err) {
-    console.log(`⚠️ Webhook signature verification failed.`, err.message);
+    console.log('⚠️ Webhook signature verification failed.', err.message);
     return res.sendStatus(400);
   }
 
   if (event.type === 'checkout.session.completed') {
     const session = event.data.object;
-    const serial = session.metadata.serial_number;
-    const featuresPurchased = session.metadata.features_purchased?.split(',') || [];
+    const serial = (session.metadata?.serial_number || '').toUpperCase();
+    const featuresPurchased = (session.metadata?.features_purchased || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((fid) => fid.replace(/^feature-/, ''));
 
-    console.log(`Pagamento completato per il seriale: ${serial}`);
+    console.log(`Pagamento completato per seriale: ${serial}`);
 
-    if (licenseDatabase[serial]) {
-      // 1. MODIFICA i dati in memoria
+    if (serial) {
+      if (!licenseDatabase[serial]) {
+        licenseDatabase[serial] = {
+          status: 'not-active',
+          activation_date: null,
+          expires: null,
+          activeFeatures: [],
+        };
+      }
+
       licenseDatabase[serial].status = 'valid';
       const today = new Date();
       licenseDatabase[serial].activation_date = today.toISOString().split('T')[0];
-      const nextYear = new Date(new Date().setFullYear(today.getFullYear() + 1));
+      const nextYear = new Date(today);
+      nextYear.setFullYear(today.getFullYear() + 1);
       licenseDatabase[serial].expires = nextYear.toISOString().split('T')[0];
-      
-      // Aggiungi le nuove funzionalità, evitando duplicati
-      const newFeatures = new Set([...licenseDatabase[serial].activeFeatures, ...featuresPurchased]);
-      licenseDatabase[serial].activeFeatures = Array.from(newFeatures);
 
-      // 2. SALVA l'intero database aggiornato su file
+      const setFeatures = new Set(licenseDatabase[serial].activeFeatures);
+      featuresPurchased.forEach((f) => setFeatures.add(f));
+      licenseDatabase[serial].activeFeatures = Array.from(setFeatures);
+
       await saveDatabase();
     }
   }
 
-  res.json({received: true});
+  res.json({ received: true });
 });
 
-// --- Avvio del Server ---
+// --- Avvio ---
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`🚀 Server in ascolto sulla porta ${PORT}`));
