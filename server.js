@@ -7,20 +7,50 @@ const app = express();
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 // Middleware
-app.use(cors()); // Permette al tuo sito su Aruba di comunicare con questo server
+app.use(cors());
 app.use(express.json());
 
 // --- DA PERSONALIZZARE ---
-// Inserisci qui l'ID esatto di ogni tuo prodotto/opzione e il suo prezzo IN CENTESIMI.
-// Esempio: 299.00€ diventa 29900.
-// Questo è fondamentale per la sicurezza, per non fidarsi mai del prezzo inviato dal browser.
-const productDatabase = {
-  'dp-mini-base':   { priceInCents: 29900, name: 'DP Mini - Configurazione Base' },
-  'dp-pro-base':    { priceInCents: 89900, name: 'DP Pro - Configurazione Base' },
-  // Aggiungi qui TUTTI gli altri tuoi ID prodotto con i rispettivi prezzi e nomi
-  // 'id-opzione-1': { priceInCents: 5000, name: 'Opzione Extra Alpha' },
-  // 'id-opzione-2': { priceInCents: 7500, name: 'Opzione Extra Beta' },
+// Ho ricreato una struttura prezzi dettagliata.
+// Assicurati che i prezzi qui corrispondano a quelli sul tuo sito.
+// Tutti i prezzi sono in CENTESIMI (es. 299.00€ -> 29900).
+
+const PRICES = {
+  'dp-mini-base': 29900,
+  'dp-pro-base': 89900,
+  // Aggiungi qui gli altri prodotti base
 };
+
+const OPTIONS_PRICES = {
+  // Opzioni DP Mini
+  objectives: { '50mm': 0, '60mm': 1800, '75mm': 3500 },
+  eyepieces: { screen: 0, hd: 2900, '4k': 5800 },
+  mounting: { handle: 0, arm: 2200 },
+  // Opzioni DP Pro (aggiungi le altre se necessario)
+  stabilization: { '3axis': 0, enhanced: 4500 },
+  // Opzioni comuni
+  care: { none: 0, basic: 2900, plus: 4900 },
+  // Aggiungi qui tutte le altre opzioni...
+};
+
+// Funzione per calcolare il prezzo di un singolo articolo in modo sicuro
+function calculateItemPrice(item) {
+  if (!item || !item.id || PRICES[item.id] === undefined) {
+    throw new Error(`ID prodotto base '${item.id}' non valido.`);
+  }
+
+  let total = PRICES[item.id];
+
+  // Aggiunge il costo delle opzioni
+  if (item.options) {
+    for (const [category, selection] of Object.entries(item.options)) {
+      if (OPTIONS_PRICES[category] && OPTIONS_PRICES[category][selection] !== undefined) {
+        total += OPTIONS_PRICES[category][selection];
+      }
+    }
+  }
+  return total;
+}
 
 
 app.get('/', (req, res) => {
@@ -36,23 +66,20 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 
   try {
+    // NUOVA LOGICA: Calcoliamo il prezzo per ogni articolo sul server
     const lineItems = cart.map(item => {
-      const product = productDatabase[item.id];
-      if (!product) {
-        // Se un prodotto non è nel nostro database, blocca la transazione
-        throw new Error(`Prodotto con ID '${item.id}' non trovato o non valido.`);
-      }
+      const serverPrice = calculateItemPrice(item);
+      
       return {
         price_data: {
           currency: 'eur',
           product_data: {
-            name: product.name,
-            // Aggiunge una descrizione delle opzioni se presenti
+            name: item.name, // Prendiamo il nome completo dal frontend
             description: item.options ? Object.values(item.options).filter(val => val).join(', ') : 'Prodotto standard',
           },
-          unit_amount: product.priceInCents,
+          unit_amount: serverPrice, // Usiamo il prezzo calcolato e sicuro
         },
-        quantity: 1, // La logica del tuo carrello gestisce la quantità duplicando gli oggetti
+        quantity: 1,
       };
     });
 
@@ -67,19 +94,13 @@ app.post('/create-checkout-session', async (req, res) => {
         {
           shipping_rate_data: {
             type: 'fixed_amount',
-            fixed_amount: { amount: 4990, currency: 'eur' }, // 49.90€ in centesimi
+            fixed_amount: { amount: 4990, currency: 'eur' },
             display_name: 'Spedizione Standard Internazionale',
-            delivery_estimate: {
-              minimum: { unit: 'business_day', value: 5 },
-              maximum: { unit: 'business_day', value: 7 },
-            },
           },
         },
       ],
-      // --- DA PERSONALIZZARE ---
-      // Inserisci qui l'indirizzo REALE del tuo sito su Aruba.
-      success_url: `https://www.tuosito-su-aruba.it/success.html`,
-      cancel_url: `https://www.tuosito-su-aruba.it/checkout.html`,
+      success_url: `https://www.tuosito-su-aruba.it/success.html`, // Assicurati sia il tuo URL reale
+      cancel_url: `https://www.tuosito-su-aruba.it/checkout.html`,  // Assicurati sia il tuo URL reale
     });
 
     res.json({ url: session.url });
@@ -90,6 +111,5 @@ app.post('/create-checkout-session', async (req, res) => {
   }
 });
 
-// Render usa la variabile PORT, altrimenti usa la 4242 per i test locali
 const PORT = process.env.PORT || 4242;
 app.listen(PORT, () => console.log(`Server in ascolto sulla porta ${PORT}`));
