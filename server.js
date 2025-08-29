@@ -64,10 +64,15 @@ app.get('/', (req, res) => {
 });
 
 app.post('/create-checkout-session', async (req, res) => {
-  const { cart } = req.body;
+  // MODIFICA 1: Ottieni anche l'email del cliente dal front-end
+  const { cart, customerEmail } = req.body;
 
   if (!cart || !Array.isArray(cart) || cart.length === 0) {
     return res.status(400).json({ error: 'Cart is empty or invalid.' });
+  }
+  
+  if (!customerEmail) {
+    return res.status(400).json({ error: 'Customer email is required.'});
   }
 
   try {
@@ -87,12 +92,17 @@ app.post('/create-checkout-session', async (req, res) => {
       };
     });
 
+    // MODIFICA 2: Crea un nuovo cliente Stripe
+    const customer = await stripe.customers.create({
+      email: customerEmail,
+    });
+
     const session = await stripe.checkout.sessions.create({
+      // MODIFICA 3: Associa la sessione all'ID del cliente appena creato
+      customer: customer.id,
       mode: 'payment',
-      // MODIFICA 1: Aggiunto 'customer_balance' per abilitare il flusso del bonifico
       payment_method_types: ['card', 'paypal', 'customer_balance'],
       line_items: lineItems,
-      // MODIFICA 2: Aggiunto blocco di opzioni per configurare il bonifico
       payment_method_options: {
         customer_balance: {
           funding_type: 'bank_transfer',
