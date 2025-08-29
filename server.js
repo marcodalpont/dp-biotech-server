@@ -179,15 +179,17 @@ app.post('/create-checkout-session', async (req, res) => {
         .join(',');
     }
 
-    const session = await stripe.checkout.sessions.create({
-      customer: customer.id,
-      mode: 'payment',
-      automatic_payment_methods: { enabled: true },
-      line_items: lineItems,
-      metadata: sessionMetadata,
-      success_url: `https://www.dpbiotech.com/success.html`,
-      cancel_url: `https://www.dpbiotech.com/checkout.html`,
-    });
+  const session = await stripe.checkout.sessions.create({
+  customer: customer.id,
+  mode: 'payment',
+  // Usa payment_method_types compatibile con versioni API meno recenti
+  payment_method_types: ['card'], // ✅ mantieni 'card' per compatibilità
+  line_items: lineItems,
+  metadata: sessionMetadata,
+  success_url: `https://www.dpbiotech.com/success.html`,
+  cancel_url: `https://www.dpbiotech.com/checkout.html`,
+});
+
 
     console.log('Stripe session created:', session.id);
     res.json({ url: session.url });
