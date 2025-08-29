@@ -1,5 +1,5 @@
 serial,status,activation_date,expiration_date,feature_3d_models,feature_parallax,feature_image_addition,feature_ndi
-DP8X1Y3Z,not-active,,,,False,False,False,False
+DP8X1Y3Z,active,,,,False,False,False,False
 DPG5H6J7,not-active,,,,False,False,False,False
 DPK2L4M1,not-active,,,,False,False,False,False
 DPN9B0V8,not-active,,,,False,False,False,False
@@ -774,4 +774,5 @@ DPF7G8H9,not-active,,,,False,False,False,False
 DPJ0K1L2,not-active,,,,False,False,False,False
 DPM3N4B5,not-active,,,,False,False,False,False
 DPV6C7X8,not-active,,,,False,False,False,False
+
 DPZ9Q0W1,not-active,,,,False,False,False,False
