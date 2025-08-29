@@ -129,28 +129,52 @@ app.get('/check-license/:serial', (req, res) => {
 });
 
 app.post('/create-checkout-session', async (req, res) => {
+  // DEBUG: loggre la richiesta in ingresso (non in produzione)
+  console.log('Incoming /create-checkout-session payload:', JSON.stringify(req.body, null, 2));
+
   const { cart, customerEmail, serialNumber } = req.body;
-  if (!customerEmail || !cart || cart.length === 0) {
+
+  // Validazioni lato server
+  if (!process.env.STRIPE_SECRET_KEY) {
+    console.error('Config error: STRIPE_SECRET_KEY is missing');
+    return res.status(500).json({ error: 'Stripe configuration missing (secret key).' });
+  }
+  if (!customerEmail || !Array.isArray(cart) || cart.length === 0) {
     return res.status(400).json({ error: 'Dati mancanti: carrello e email sono obbligatori.' });
   }
 
+  // Validare gli ID del carrello PRIMA di chiamare Stripe
   try {
+    cart.forEach((item) => {
+      if (!item?.id || PRICES[item.id] === undefined) {
+        throw new Error(`ID Prodotto non valido: '${item?.id}'`);
+      }
+    });
+  } catch (e) {
+    console.error('Cart validation error:', e.message);
+    return res.status(400).json({ error: e.message });
+  }
+
+  try {
+    // Calcolo prezzi (server-trusted)
     const lineItems = cart.map((item) => ({
       price_data: {
         currency: 'eur',
-        product_data: { name: item.name },
-        unit_amount: calculateItemPrice(item),
+        product_data: { name: item.name || item.id },
+        unit_amount: calculateItemPrice(item), // usa PRICES e OPTIONS_PRICES
       },
       quantity: 1,
     }));
 
+    // Crea/riusa cliente per email
     const customer = await stripe.customers.create({ email: customerEmail });
 
+    // Metadati per il webhook (serial + features acquistate)
     const sessionMetadata = {};
     if (serialNumber) {
-      sessionMetadata.serial_number = serialNumber;
+      sessionMetadata.serial_number = String(serialNumber).toUpperCase();
       sessionMetadata.features_purchased = cart
-        .filter((i) => i.id.startsWith('feature-'))
+        .filter((i) => String(i.id).startsWith('feature-'))
         .map((i) => i.id)
         .join(',');
     }
@@ -165,12 +189,25 @@ app.post('/create-checkout-session', async (req, res) => {
       cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
 
+    console.log('Stripe session created:', session.id);
     res.json({ url: session.url });
   } catch (error) {
-    console.error('Errore Stripe:', error.message);
-    res.status(500).json({ error: 'Errore interno del server.' });
+    // Qui non maschero l’errore: lo loggo bene, e mando al client un messaggio più utile.
+    // In produzione potresti rimettere un messaggio generico, ma intanto serve visibilità.
+    console.error('Stripe error:', {
+      message: error.message,
+      type: error.type,
+      code: error.code,
+      param: error.param,
+      raw: error.raw,
+    });
+
+    // Se è un errore Stripe noto, mando il suo messaggio; altrimenti un 500 generico.
+    const status = error?.statusCode && Number.isInteger(error.statusCode) ? error.statusCode : 500;
+    res.status(status).json({ error: error.message || 'Errore interno del server.' });
   }
 });
+
 
 app.post('/stripe-webhook', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
