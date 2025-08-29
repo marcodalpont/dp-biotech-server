@@ -10,59 +10,64 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 app.use(cors());
 app.use(express.json());
 
-// --- DA PERSONALIZZARE ---
-// Struttura prezzi con i valori corretti in CENTESIMI.
-// Regola: Prezzo in Euro × 100 = Valore in Centesimi
-// Esempio: €2.990,00  ->  299000
-
+// --- Price Database ---
+// Contains all purchasable items, physical or digital.
+// Prices are in CENTS (e.g., €129.00 -> 12900).
 const PRICES = {
-  'dp-mini-base': 299000, // Corretto da 29900
-  'dp-pro-base': 899000,   // Corretto da 89900
-  // Aggiungi qui gli altri prodotti base
+  // Physical Products
+  'dp-mini-base': 299000,
+  'dp-pro-base': 899000,
+  
+  // License Products (Added)
+  'license-base': 60000,               // 3000€ / 5 = 600€ -> 60000 cents
+  'feature-3d-models': 12900,         // 129€ -> 12900 cents
+  'feature-parallax': 4900,             // 49€  -> 4900 cents
+  'feature-image-addition': 4900,     // 49€  -> 4900 cents
+  'feature-ndi': 22000,                 // 220€ -> 22000 cents
 };
 
 const OPTIONS_PRICES = {
-  // Opzioni DP Mini
-  objectives: { '50mm': 0, '60mm': 18000, '75mm': 35000 },    // Corretto
-  eyepieces: { screen: 0, hd: 29000, '4k': 58000 },         // Corretto
-  mounting: { handle: 0, arm: 22000 },                      // Corretto
-  // Opzioni DP Pro (aggiungi le altre se necessario)
-  stabilization: { '3axis': 0, enhanced: 45000 },             // Corretto
-  // Opzioni comuni
-  care: { none: 0, basic: 29000, plus: 49000 },             // Corretto
-  // Aggiungi qui tutte le altre opzioni...
+  // Options for physical products
+  objectives: { '50mm': 0, '60mm': 18000, '75mm': 35000 },
+  eyepieces: { screen: 0, hd: 29000, '4k': 58000 },
+  mounting: { handle: 0, arm: 22000 },
+  stabilization: { '3axis': 0, enhanced: 45000 },
+  care: { none: 0, basic: 29000, plus: 49000 },
 };
 
-// Funzione per calcolare il prezzo di un singolo articolo in modo sicuro
+// Calculates the final price of an item on the server to prevent tampering
 function calculateItemPrice(item) {
-  if (!item || !item.id || PRICES[item.id] === undefined) {
-    throw new Error(`ID prodotto base '${item.id}' non valido.`);
-  }
-
-  let total = PRICES[item.id];
-
-  // Aggiunge il costo delle opzioni
-  if (item.options) {
+  // For items with options (like physical microscopes)
+  if (item.options && Object.keys(item.options).length > 0) {
+    if (!item || !item.id || PRICES[item.id] === undefined) {
+      throw new Error(`Base product ID '${item.id}' is invalid.`);
+    }
+    let total = PRICES[item.id];
     for (const [category, selection] of Object.entries(item.options)) {
       if (OPTIONS_PRICES[category] && OPTIONS_PRICES[category][selection] !== undefined) {
         total += OPTIONS_PRICES[category][selection];
       }
     }
+    return total;
+  } 
+  // For simple items without options (like licenses and features)
+  else {
+    if (!item || !item.id || PRICES[item.id] === undefined) {
+      throw new Error(`Product ID '${item.id}' is invalid.`);
+    }
+    return PRICES[item.id];
   }
-  return total;
 }
 
-
 app.get('/', (req, res) => {
-  res.send('Server di pagamento DP Biotech attivo.');
+  res.send('DP Biotech Payment Server is active.');
 });
-
 
 app.post('/create-checkout-session', async (req, res) => {
   const { cart } = req.body;
 
   if (!cart || !Array.isArray(cart) || cart.length === 0) {
-    return res.status(400).json({ error: 'Il carrello è vuoto o non valido.' });
+    return res.status(400).json({ error: 'Cart is empty or invalid.' });
   }
 
   try {
@@ -73,10 +78,10 @@ app.post('/create-checkout-session', async (req, res) => {
         price_data: {
           currency: 'eur',
           product_data: {
-            name: item.name, // Prendiamo il nome completo dal frontend
-            description: item.options ? Object.values(item.options).filter(val => val).join(', ') : 'Prodotto standard',
+            name: item.name,
+            description: item.options ? Object.values(item.options).filter(val => val).join(', ') : undefined,
           },
-          unit_amount: serverPrice, // Usiamo il prezzo calcolato e sicuro
+          unit_amount: serverPrice,
         },
         quantity: 1,
       };
@@ -93,22 +98,22 @@ app.post('/create-checkout-session', async (req, res) => {
         {
           shipping_rate_data: {
             type: 'fixed_amount',
-            fixed_amount: { amount: 4990, currency: 'eur' }, // 49.90€
-            display_name: 'Spedizione Standard Internazionale',
+            fixed_amount: { amount: 4990, currency: 'eur' },
+            display_name: 'Standard International Shipping',
           },
         },
       ],
-success_url: `https://www.dpbiotech.com/success.html`,
-cancel_url: `https://www.dpbiotech.com/checkout.html`,
+      success_url: `https://www.dpbiotech.com/success.html`,
+      cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
 
     res.json({ url: session.url });
 
   } catch (error) {
-    console.error('Errore durante la creazione della sessione Stripe:', error.message);
-    res.status(500).json({ error: 'Errore interno del server: ' + error.message });
+    console.error('Stripe session creation error:', error.message);
+    res.status(500).json({ error: 'Internal server error: ' + error.message });
   }
 });
 
 const PORT = process.env.PORT || 4242;
-app.listen(PORT, () => console.log(`Server in ascolto sulla porta ${PORT}`));
+app.listen(PORT, () => console.log(`Server is listening on port ${PORT}`));
