@@ -64,7 +64,6 @@ app.get('/', (req, res) => {
 });
 
 app.post('/create-checkout-session', async (req, res) => {
-  // MODIFICA 1: Ottieni anche l'email del cliente dal front-end
   const { cart, customerEmail } = req.body;
 
   if (!cart || !Array.isArray(cart) || cart.length === 0) {
@@ -92,13 +91,11 @@ app.post('/create-checkout-session', async (req, res) => {
       };
     });
 
-    // MODIFICA 2: Crea un nuovo cliente Stripe
     const customer = await stripe.customers.create({
       email: customerEmail,
     });
 
     const session = await stripe.checkout.sessions.create({
-      // MODIFICA 3: Associa la sessione all'ID del cliente appena creato
       customer: customer.id,
       mode: 'payment',
       payment_method_types: ['card', 'paypal', 'customer_balance'],
@@ -108,6 +105,10 @@ app.post('/create-checkout-session', async (req, res) => {
           funding_type: 'bank_transfer',
           bank_transfer: {
             type: 'eu_bank_transfer',
+            // *** ECCO LA RIGA CORRETTA ***
+            eu_bank_transfer: {
+              country: 'DE'
+            }
           },
         },
       },
