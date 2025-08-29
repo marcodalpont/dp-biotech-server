@@ -89,8 +89,18 @@ app.post('/create-checkout-session', async (req, res) => {
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
-      payment_method_types: ['card', 'paypal'],
+      // MODIFICA 1: Aggiunto 'customer_balance' per abilitare il flusso del bonifico
+      payment_method_types: ['card', 'paypal', 'customer_balance'],
       line_items: lineItems,
+      // MODIFICA 2: Aggiunto blocco di opzioni per configurare il bonifico
+      payment_method_options: {
+        customer_balance: {
+          funding_type: 'bank_transfer',
+          bank_transfer: {
+            type: 'eu_bank_transfer',
+          },
+        },
+      },
       shipping_address_collection: {
         allowed_countries: ['IT', 'FR', 'DE', 'ES', 'GB', 'US', 'CH', 'AT', 'BE', 'NL'],
       },
