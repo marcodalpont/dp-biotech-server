@@ -98,8 +98,8 @@ app.post('/create-checkout-session', async (req, res) => {
           },
         },
       ],
-      success_url: `https://www.tuosito-su-aruba.it/success.html`, // Assicurati sia il tuo URL reale
-      cancel_url: `https://www.tuosito-su-aruba.it/checkout.html`,  // Assicurati sia il tuo URL reale
+success_url: `https://www.dpbiotech.com/success.html`,
+cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
 
     res.json({ url: session.url });
