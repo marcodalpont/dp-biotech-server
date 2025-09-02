@@ -277,8 +277,8 @@ app.post('/create-checkout-session', async (req, res) => {
           },
       }],
       metadata,
-      success_url: `https://dp-biotech-seven.vercel.app/success.html`,
-      cancel_url: `https://dp-biotech-seven.vercel.app/checkout.html`,
+      success_url: `https://www.dpbiotech.com/success.html`,
+      cancel_url: `https://www.dpbiotech.com/checkout.html`,
     });
 
     console.log('Stripe session created:', session.id);
