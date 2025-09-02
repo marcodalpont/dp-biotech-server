@@ -146,13 +146,13 @@ async function saveDatabaseToGitHub({ commitMessage = 'chore: update license dat
 
 // Server-trusted base prices in cents
 const PRICES = {
-    'dp-mini-base': 1490000,          // Updated: €14,900.00
-    'dp-pro-base': 3490000,           // Updated: €34,900.00
-    'license-base': 60000,           // €  600.00
-    'feature-3d-models': 12900,      // €  129.00
-    'feature-parallax': 4900,        // €   49.00
-    'feature-image-addition': 4900,  // €   49.00
-    'feature-ndi': 22000,            // €  220.00
+    'dp-mini-base': 299000,
+    'dp-pro-base': 899000,
+    'license-base': 60000,
+    'feature-3d-models': 12900,
+    'feature-parallax': 4900,
+    'feature-image-addition': 4900,
+    'feature-ndi': 22000,
 };
 
 // Server-trusted option prices in cents, based on client-side files
