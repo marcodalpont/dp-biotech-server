@@ -278,7 +278,7 @@ app.post('/create-checkout-session', async (req, res) => {
       }],
       metadata,
       success_url: `https://www.dpbiotech.com/success.html`,
-      cancel_url: `https://www.dpbiotech.com/checkout.html`,
+      cancel_url: `https://www.dpbiotech.com/cancel.html`,
     });
 
     console.log('Stripe session created:', session.id);
