@@ -24,6 +24,7 @@ if (!GITHUB_TOKEN) console.error('❗ Missing GITHUB_TOKEN');
 const app = express();
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 
+// JSON body for all routes except the webhook (which needs the raw body)
 app.use(cors());
 app.use((req, res, next) => {
   if (req.originalUrl === '/stripe-webhook') {
@@ -33,9 +34,10 @@ app.use((req, res, next) => {
   }
 });
 
-// ====== IN-MEMORY DB & HELPERS (Unchanged) ======
+// ====== IN-MEMORY DB ======
 let licenseDatabase = {};
-let currentGitSha = null;
+
+// ====== GITHUB & CSV HELPERS (Unchanged) ======
 const GH_API = 'https://api.github.com';
 
 async function githubGetFile(owner, repo, path, branch, token) {
@@ -108,6 +110,7 @@ function csvToDb(csv) {
   return out;
 }
 
+let currentGitSha = null;
 async function loadDatabaseFromGitHub() {
   try {
     const fileMeta = await githubGetFile(GITHUB_OWNER, GITHUB_REPO, GITHUB_FILE_PATH, GITHUB_BRANCH, GITHUB_TOKEN);
@@ -139,13 +142,20 @@ async function saveDatabaseToGitHub({ commitMessage = 'chore: update license dat
   console.log('✅ Database CSV updated on GitHub.');
 }
 
+// ====== UPDATED & COMPATIBLE PRICING LOGIC ======
 
-// ====== PRICING LOGIC (Unchanged) ======
+// Server-trusted base prices in cents
 const PRICES = {
-    'dp-mini-base': 299000, 'dp-pro-base': 899000, 'license-base': 60000,
-    'feature-3d-models': 12900, 'feature-parallax': 4900,
-    'feature-image-addition': 4900, 'feature-ndi': 22000,
+    'dp-mini-base': 299000,
+    'dp-pro-base': 899000,
+    'license-base': 60000,
+    'feature-3d-models': 12900,
+    'feature-parallax': 4900,
+    'feature-image-addition': 4900,
+    'feature-ndi': 22000,
 };
+
+// Server-trusted option prices in cents, based on client-side files
 const OPTIONS_PRICES = {
     objective: { '50mm': 0, '60mm': 29000, '75mm': 54000 },
     eyepiece: { 'Screen': 0, 'Full HD': 154000, '4K UHD': 208500 },
@@ -153,44 +163,64 @@ const OPTIONS_PRICES = {
     stabilization: { 'Standard': 0, 'Enhanced': 45000 },
     arm: { 'Standard': 0, 'Extended': 68000 },
     ai: { 'Standard': 0, 'Advanced': 59000 },
-    controls: { 'Multifunctional Joystick': 28000, 'Foot Pedal Control': 19000 }
+    controls: {
+        'Multifunctional Joystick': 28000,
+        'Foot Pedal Control': 19000
+    }
 };
 
+/**
+ * Calculates item price securely on the server (compatible with older JS versions).
+ */
 function calculateItemPrice(item) {
-    if (!item || !item.id) { throw new Error(`Invalid product data provided.`); }
-    if (PRICES[item.id]) { return PRICES[item.id]; }
+    if (!item || !item.id) {
+        throw new Error(`Invalid product data provided.`);
+    }
+
+    if (PRICES[item.id]) {
+        return PRICES[item.id];
+    }
 
     const options = item.options || {};
     let total = 0;
 
     if (item.id.startsWith('dp-mini-')) {
         total += PRICES['dp-mini-base'];
+        
         const objectivePrice = (OPTIONS_PRICES.objective && OPTIONS_PRICES.objective[options.objective]);
         const eyepiecePrice = (OPTIONS_PRICES.eyepiece && OPTIONS_PRICES.eyepiece[options.eyepiece]);
+        
         if (objectivePrice === undefined || eyepiecePrice === undefined) {
              throw new Error(`Invalid options for DP Mini: ${JSON.stringify(options)}`);
         }
+
         total += objectivePrice;
         total += eyepiecePrice;
         total += (OPTIONS_PRICES.mount && OPTIONS_PRICES.mount[options.mount]) || 0;
         return total;
     }
+
     if (item.id.startsWith('dppro-')) {
         total += PRICES['dp-pro-base'];
+        
         const stabilizationKey = (options.stabilization && options.stabilization.includes('Enhanced')) ? 'Enhanced' : 'Standard';
         const armKey = (options.arm && options.arm.includes('Extended')) ? 'Extended' : 'Standard';
         const aiKey = (options.ai && options.ai.includes('Advanced')) ? 'Advanced' : 'Standard';
+        
         total += (OPTIONS_PRICES.stabilization && OPTIONS_PRICES.stabilization[stabilizationKey]) || 0;
         total += (OPTIONS_PRICES.arm && OPTIONS_PRICES.arm[armKey]) || 0;
         total += (OPTIONS_PRICES.ai && OPTIONS_PRICES.ai[aiKey]) || 0;
+        
         if (options.controls && options.controls.includes('Multifunctional Joystick')) {
             total += OPTIONS_PRICES.controls['Multifunctional Joystick'];
         }
         if (options.controls && options.controls.includes('Foot Pedal Control')) {
             total += OPTIONS_PRICES.controls['Foot Pedal Control'];
         }
+
         return total;
     }
+
     throw new Error(`ID Prodotto non valido: '${item.id}'`);
 }
 
@@ -208,6 +238,7 @@ app.get('/check-license/:serial', async (req, res) => {
 
 app.post('/create-checkout-session', async (req, res) => {
   const { cart, customerEmail, serialNumber } = req.body || {};
+
   if (!customerEmail || !Array.isArray(cart) || cart.length === 0) {
     return res.status(400).json({ error: 'Missing data: cart and email are required.' });
   }
@@ -233,9 +264,7 @@ app.post('/create-checkout-session', async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       customer: customer.id,
       mode: 'payment',
-      // ====== MODIFICATION START ======
-      payment_method_types: ['card', 'klarna', 'sofort', 'paypal'], // Added 'paypal'
-      // ====== MODIFICATION END ======
+      payment_method_types: ['card', 'klarna', 'sofort'],
       line_items: lineItems,
       shipping_address_collection: {
           allowed_countries: ['IT', 'AT', 'DE', 'CH', 'FR', 'ES', 'GB', 'US'],
